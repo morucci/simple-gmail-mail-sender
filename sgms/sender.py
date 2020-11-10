@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-
-# Copyright (c) <2020> <fbo@redhat.com>
+# Copyright (c) <2020> <fboucher@redhat.com>
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -29,7 +27,7 @@ import argparse
 from pathlib import Path
 
 from dataclasses import dataclass, asdict
-from typing import Union, Any, Dict
+from typing import Union, Any, Dict, List
 
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -130,6 +128,46 @@ def send_message(service, message: Message) -> Union[Any, None]:
     return None
 
 
+@dataclass
+class SendStatus:
+    status: str
+
+
+def create_send_status(status: str) -> SendStatus:
+    assert str not in ["SENT", "SKIPPED", "FAILURE"]
+    return SendStatus(status=status)
+
+
+def load_and_send(service, yaml_message: Path, from_email: str) -> SendStatus:
+    if yaml_message.suffix in [".yml", ".yaml"]:
+        if yaml_message.name.startswith("_sent_"):
+            # Short circuit as already sent
+            return create_send_status("SKIPPED")
+        m = load_message_from_file(Path(yaml_message), from_email)
+        if m:
+            status = send_message(service, m)
+            return create_send_status("SENT")
+    else:
+        logging.info("Skipping %s due to invalid file extension")
+    return create_send_status("FAILURE")
+
+
+def process_directory(service, directory: Path, from_email: str) -> List[SendStatus]:
+    ret = []
+    if directory.exists():
+        logging.info("Reading %s ..." % directory)
+        paths = directory.iterdir()
+        for path in paths:
+            if path.suffix in [".yml", ".yaml"]:
+                status = load_and_send(service, path, from_email)
+                if status:
+                    path.rename(path.parent / Path("_sent_" + str(path.name)))
+                ret.append(status)
+    else:
+        logging.info("Unable to find %s" % path)
+    return ret
+
+
 def main() -> None:
 
     parser = argparse.ArgumentParser(prog="sgms")
@@ -138,6 +176,11 @@ def main() -> None:
         "--from-email", help="The from recipient address", required=False
     )
     parser.add_argument("--yaml-message", help="The message in YAML", required=False)
+    parser.add_argument(
+        "--from-directory",
+        help="The directory to read YAML message from",
+        required=False,
+    )
     parser.add_argument(
         "--auth-only",
         help="Only perform the auth flow to get the token",
@@ -161,10 +204,24 @@ def main() -> None:
     if args.auth_only:
         sys.exit(0)
 
-    if args.yaml_message and args.from_email:
-        service = build("gmail", "v1", credentials=creds)
-        m = load_message_from_file(Path(args.yaml_message), args.from_email)
-        if m:
-            status = send_message(service, m)
-            if not status:
-                sys.exit(-1)
+    if not args.from_email:
+        logging.info("Please provide --from-email")
+
+    service = build("gmail", "v1", credentials=creds)
+
+    if args.yaml_message:
+        if not load_and_send(service, Path(args.yaml_message), args.from_email):
+            sys.exit(-1)
+    elif args.from_directory:
+        directory = Path(args.from_directory).expanduser()
+        status = process_directory(service, directory, args.from_email)
+        sent = len(list(filter(lambda s: s.status == "SENT", status)))
+        skipped = len(list(filter(lambda s: s.status == "SKIPPED", status)))
+        failed = len(list(filter(lambda s: s.status == "FAILURE", status)))
+        logging.info("Sent: %s, Skipped: %s, failed: %s" % (sent, skipped, failed))
+        if failed:
+            sys.exit(-1)
+    else:
+        logging.info(
+            "No action performed. Did you forget to pass --from-email or --from-directory"
+        )

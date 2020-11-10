@@ -58,3 +58,15 @@ The email to send must be provided as a YAML payload.
 ```
 sgms --from-email user@gmail.com --yaml-message mail.yaml
 ```
+
+Send emails for a directory
+---------------------------
+
+Prepare a directory with some messages as YAML files and run:
+
+```
+sgms --from-email user@gmail.com --yaml-directory pool/
+```
+
+Message files that have been sent are renamed with the prefix *_sent_*
+and won't be proceed the next call of the command.
