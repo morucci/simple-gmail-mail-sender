@@ -1,0 +1,5 @@
+sgms.egg-info
+build
+dist
+.tox
+*.py[co]
