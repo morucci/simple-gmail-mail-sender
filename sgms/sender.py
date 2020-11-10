@@ -26,10 +26,9 @@ import logging
 import argparse
 from pathlib import Path
 
-from dataclasses import dataclass, asdict
-from typing import Union, Any, Dict, List
+from typing import Union, Any, Dict, List, Literal, TypedDict
 
-from googleapiclient.discovery import build
+from googleapiclient.discovery import build, Resource
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -39,6 +38,9 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 WORKDIR = Path("~/.sgms/").expanduser()
 TOKEN = WORKDIR / Path("token.pickle")
 CREDS = WORKDIR / Path("credentials.json")
+
+
+SendStatus = Literal["SENT", "SKIPPED", "FAILURE"]
 
 
 def create_workspace(workdir: Path) -> Union[Path, None]:
@@ -70,20 +72,18 @@ def auth(token: Path, credentials: Path) -> Credentials:
     return creds
 
 
-@dataclass
-class Message:
+class Message(TypedDict):
     sender: str
     to: str
     subject: str
     body: str
 
 
-@dataclass
-class RawMessage:
+class RawMessage(TypedDict):
     raw: str
 
 
-def load_yaml_message(yaml_data: Dict[str, Any], sender: str) -> Message:
+def load_yaml_message(yaml_data: Dict[str, str], sender: str) -> Message:
     return Message(
         sender=sender,
         to=yaml_data["to"],
@@ -104,55 +104,47 @@ def load_message_from_file(path: Path, sender: str) -> Union[None, Message]:
 
 
 def create_message(message: Message) -> RawMessage:
-    d = MIMEText(message.body)
-    d["to"] = message.to
-    d["from"] = message.sender
-    d["subject"] = message.subject
+    d = MIMEText(message["body"])
+    d["to"] = message["to"]
+    d["from"] = message["sender"]
+    d["subject"] = message["subject"]
 
     return RawMessage(raw=base64.urlsafe_b64encode(d.as_bytes()).decode())
 
 
-def send_message(service, message: Message) -> Union[Any, None]:
+def send_message(service: Resource, message: Message) -> Union[Any, None]:
     raw_message = create_message(message)
     try:
         ret = (
             service.users()
             .messages()
-            .send(userId=message.sender, body=asdict(raw_message))
+            .send(userId=message["sender"], body=raw_message)
             .execute()
         )
-        logging.info("Sent message to %s (Id: %s)" % (message.to, ret["id"]))
+        logging.info("Sent message to %s (Id: %s)" % (message["to"], ret["id"]))
         return ret
     except Exception:
-        logging.exception("Unable to send message to %s" + message.to)
+        logging.exception("Unable to send message to %s" + message["to"])
     return None
 
 
-@dataclass
-class SendStatus:
-    status: str
-
-
-def create_send_status(status: str) -> SendStatus:
-    assert str not in ["SENT", "SKIPPED", "FAILURE"]
-    return SendStatus(status=status)
-
-
-def load_and_send(service, yaml_message: Path, from_email: str) -> SendStatus:
+def load_and_send(service: Resource, yaml_message: Path, from_email: str) -> SendStatus:
     if yaml_message.suffix in [".yml", ".yaml"]:
         if yaml_message.name.startswith("_sent_"):
             # Short circuit as already sent
-            return create_send_status("SKIPPED")
+            return "SKIPPED"
         m = load_message_from_file(Path(yaml_message), from_email)
         if m:
             status = send_message(service, m)
-            return create_send_status("SENT")
+            return "SENT"
     else:
         logging.info("Skipping %s due to invalid file extension")
-    return create_send_status("FAILURE")
+    return "FAILURE"
 
 
-def process_directory(service, directory: Path, from_email: str) -> List[SendStatus]:
+def process_directory(
+    service: Resource, directory: Path, from_email: str
+) -> List[SendStatus]:
     ret = []
     if directory.exists():
         logging.info("Reading %s ..." % directory)
@@ -160,7 +152,7 @@ def process_directory(service, directory: Path, from_email: str) -> List[SendSta
         for path in paths:
             if path.suffix in [".yml", ".yaml"]:
                 status = load_and_send(service, path, from_email)
-                if status:
+                if status == "SENT":
                     path.rename(path.parent / Path("_sent_" + str(path.name)))
                 ret.append(status)
     else:
@@ -207,7 +199,7 @@ def main() -> None:
     if not args.from_email:
         logging.info("Please provide --from-email")
 
-    service = build("gmail", "v1", credentials=creds)
+    service: Resource = build("gmail", "v1", credentials=creds)
 
     if args.yaml_message:
         if not load_and_send(service, Path(args.yaml_message), args.from_email):
@@ -215,9 +207,9 @@ def main() -> None:
     elif args.from_directory:
         directory = Path(args.from_directory).expanduser()
         status = process_directory(service, directory, args.from_email)
-        sent = len(list(filter(lambda s: s.status == "SENT", status)))
-        skipped = len(list(filter(lambda s: s.status == "SKIPPED", status)))
-        failed = len(list(filter(lambda s: s.status == "FAILURE", status)))
+        sent = len(list(filter(lambda s: s == "SENT", status)))
+        skipped = len(list(filter(lambda s: s == "SKIPPED", status)))
+        failed = len(list(filter(lambda s: s == "FAILURE", status)))
         logging.info("Sent: %s, Skipped: %s, failed: %s" % (sent, skipped, failed))
         if failed:
             sys.exit(-1)
