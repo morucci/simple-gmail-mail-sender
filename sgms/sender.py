@@ -138,7 +138,7 @@ def load_and_send(service: Resource, yaml_message: Path, from_email: str) -> Sen
             status = send_message(service, m)
             return "SENT"
     else:
-        logging.info("Skipping %s due to invalid file extension")
+        logging.info("Skipping %s due to invalid file extension" % yaml_message)
     return "FAILURE"
 
 
@@ -150,11 +150,10 @@ def process_directory(
         logging.info("Reading %s ..." % directory)
         paths = directory.iterdir()
         for path in paths:
-            if path.suffix in [".yml", ".yaml"]:
-                status = load_and_send(service, path, from_email)
-                if status == "SENT":
-                    path.rename(path.parent / Path("_sent_" + str(path.name)))
-                ret.append(status)
+            status = load_and_send(service, path, from_email)
+            if status == "SENT":
+                path.rename(path.parent / Path("_sent_" + str(path.name)))
+            ret.append(status)
     else:
         logging.info("Unable to find %s" % path)
     return ret
@@ -202,10 +201,17 @@ def main() -> None:
     service: Resource = build("gmail", "v1", credentials=creds)
 
     if args.yaml_message:
-        if not load_and_send(service, Path(args.yaml_message), args.from_email):
+        yaml_message = Path(args.yaml_message)
+        if not yaml_message.is_file():
+            logging.info("%s is not a file" % yaml_message)
+            sys.exit(-1)
+        if not load_and_send(service, yaml_message, args.from_email):
             sys.exit(-1)
     elif args.from_directory:
         directory = Path(args.from_directory).expanduser()
+        if not directory.is_dir():
+            logging.info("%s is not a directory" % directory)
+            sys.exit(-1)
         status = process_directory(service, directory, args.from_email)
         sent = len(list(filter(lambda s: s == "SENT", status)))
         skipped = len(list(filter(lambda s: s == "SKIPPED", status)))
